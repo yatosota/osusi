@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../firebase';
+import { format } from 'date-fns';
+import { ja } from 'date-fns/locale';
 
 const ConfirmationPage = () => {
   const navigate = useNavigate();
@@ -21,7 +23,15 @@ const ConfirmationPage = () => {
         // Firestoreから予約データを取得
         const reservationDoc = await getDoc(doc(db, 'reservations', reservationId));
         if (reservationDoc.exists()) {
-          setReservation(reservationDoc.data());
+          const data = reservationDoc.data();
+          // 日付データを適切に変換
+          const date = data.date.toDate();
+          setReservation({
+            ...data,
+            date,
+            // 予約番号をシンプルな形式に変更（例：R0001）
+            displayId: `R${String(parseInt(reservationId.slice(-4), 16)).padStart(4, '0')}`
+          });
         } else {
           console.error('予約が見つかりません');
           navigate('/reservations');
@@ -36,6 +46,31 @@ const ConfirmationPage = () => {
     fetchReservationDetails();
   }, [navigate]);
 
+  // 日付と時間のフォーマット
+  const formatDateTime = (date) => {
+    if (!date) return '';
+    return format(date, 'yyyy年M月d日(E) HH:mm', { locale: ja });
+  };
+
+  // 座席タイプの日本語表示
+  const getSeatTypeName = (seatType) => {
+    const seatTypes = {
+      counter: 'カウンター席',
+      table: 'テーブル席',
+      private: '個室'
+    };
+    return seatTypes[seatType] || seatType;
+  };
+
+  // コースタイプの日本語表示
+  const getCourseTypeName = (courseType) => {
+    const courseTypes = {
+      takumi: '匠（たくみ）コース',
+      miyabi: '雅（みやび）コース'
+    };
+    return courseTypes[courseType] || courseType;
+  };
+
   if (loading) {
     return <div className="flex justify-center items-center min-h-screen">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
@@ -45,16 +80,6 @@ const ConfirmationPage = () => {
   if (!reservation) {
     return null;
   }
-
-  const formatDate = (date) => {
-    return new Date(date).toLocaleDateString('ja-JP', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
 
   return (
     <div className="min-h-screen bg-gray-100 py-12 px-4 sm:px-6 lg:px-8">
@@ -77,11 +102,11 @@ const ConfirmationPage = () => {
             <dl>
               <div className="grid grid-cols-3 gap-4 py-3">
                 <dt className="text-sm font-medium text-gray-500">予約番号</dt>
-                <dd className="text-sm text-gray-900 col-span-2">{reservation.reservationId}</dd>
+                <dd className="text-sm text-gray-900 col-span-2">{reservation.displayId}</dd>
               </div>
               <div className="grid grid-cols-3 gap-4 py-3">
                 <dt className="text-sm font-medium text-gray-500">予約日時</dt>
-                <dd className="text-sm text-gray-900 col-span-2">{formatDate(reservation.date)}</dd>
+                <dd className="text-sm text-gray-900 col-span-2">{formatDateTime(reservation.date)}</dd>
               </div>
               <div className="grid grid-cols-3 gap-4 py-3">
                 <dt className="text-sm font-medium text-gray-500">人数</dt>
@@ -89,11 +114,11 @@ const ConfirmationPage = () => {
               </div>
               <div className="grid grid-cols-3 gap-4 py-3">
                 <dt className="text-sm font-medium text-gray-500">座席タイプ</dt>
-                <dd className="text-sm text-gray-900 col-span-2">{reservation.seatType}</dd>
+                <dd className="text-sm text-gray-900 col-span-2">{getSeatTypeName(reservation.seatType)}</dd>
               </div>
               <div className="grid grid-cols-3 gap-4 py-3">
                 <dt className="text-sm font-medium text-gray-500">コース</dt>
-                <dd className="text-sm text-gray-900 col-span-2">{reservation.courseType}</dd>
+                <dd className="text-sm text-gray-900 col-span-2">{getCourseTypeName(reservation.courseType)}</dd>
               </div>
               <div className="grid grid-cols-3 gap-4 py-3">
                 <dt className="text-sm font-medium text-gray-500">お支払い金額</dt>
@@ -104,10 +129,10 @@ const ConfirmationPage = () => {
 
           <div className="mt-6 flex justify-center">
             <button
-              onClick={() => navigate('/reservations')}
+              onClick={() => navigate('/')}
               className="bg-blue-500 text-white px-6 py-2 rounded-md hover:bg-blue-600 transition-colors"
             >
-              予約一覧へ戻る
+              ホームへ戻る
             </button>
           </div>
         </div>

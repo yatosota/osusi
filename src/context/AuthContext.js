@@ -1,55 +1,84 @@
-import React, { createContext, useState, useContext } from 'react';
+import React, { createContext, useState, useContext, useEffect } from 'react';
+import { 
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged
+} from 'firebase/auth';
+import { auth } from '../firebase';
 
 const AuthContext = createContext(null);
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setUser(user);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   const login = async (email, password) => {
     setLoading(true);
+    setError(null);
     try {
-      // TODO: Implement actual API call
-      const mockUser = { id: 1, email, name: 'Test User' };
-      setUser(mockUser);
-      localStorage.setItem('user', JSON.stringify(mockUser));
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      setUser(userCredential.user);
       return { success: true };
     } catch (error) {
+      console.error('Login error:', error);
+      setError(error.message);
       return { success: false, error: error.message };
     } finally {
       setLoading(false);
     }
   };
 
-  const register = async (userData) => {
+  const register = async (email, password) => {
     setLoading(true);
+    setError(null);
     try {
-      // TODO: Implement actual API call
-      const mockUser = { id: 1, ...userData };
-      setUser(mockUser);
-      localStorage.setItem('user', JSON.stringify(mockUser));
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      setUser(userCredential.user);
       return { success: true };
     } catch (error) {
+      console.error('Registration error:', error);
+      setError(error.message);
       return { success: false, error: error.message };
     } finally {
       setLoading(false);
     }
   };
 
-  const logout = () => {
-    setUser(null);
-    localStorage.removeItem('user');
-  };
-
-  const checkAuth = () => {
-    const storedUser = localStorage.getItem('user');
-    if (storedUser) {
-      setUser(JSON.parse(storedUser));
+  const logout = async () => {
+    setError(null);
+    try {
+      await signOut(auth);
+      setUser(null);
+    } catch (error) {
+      console.error('Logout error:', error);
+      setError(error.message);
     }
   };
+
+  if (loading) {
+    return <div>Loading...</div>;
+  }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, checkAuth }}>
+    <AuthContext.Provider value={{ 
+      user, 
+      loading, 
+      error,
+      login, 
+      register, 
+      logout 
+    }}>
       {children}
     </AuthContext.Provider>
   );

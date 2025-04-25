@@ -1,287 +1,282 @@
-import React, { useEffect, useState } from 'react';
-import { collection, query, where, getDocs, orderBy, deleteDoc, doc, Timestamp } from 'firebase/firestore';
-import { db } from '../firebase';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { db } from '../firebase';
+import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
+import LoadingSpinner from './common/LoadingSpinner';
+import PageLayout from './common/PageLayout';
+
+// 予約ステータスの定義
+const RESERVATION_STATUS = {
+  CONFIRMED: 'confirmed',
+  CANCELLED: 'cancelled',
+  MODIFIED: 'modified',
+  EXPIRED: 'expired'
+};
+
+// ステータスの表示名
+const STATUS_DISPLAY = {
+  [RESERVATION_STATUS.CONFIRMED]: { text: '予約確定', class: 'bg-green-100 text-green-800' },
+  [RESERVATION_STATUS.CANCELLED]: { text: 'キャンセル済み', class: 'bg-red-100 text-red-800' },
+  [RESERVATION_STATUS.MODIFIED]: { text: '変更済み', class: 'bg-yellow-100 text-yellow-800' },
+  [RESERVATION_STATUS.EXPIRED]: { text: '期限切れ', class: 'bg-gray-100 text-gray-800' }
+};
+
+// 日付を安全に変換する関数
+const safeConvertDate = (dateData) => {
+  try {
+    // nullやundefinedの場合
+    if (!dateData) {
+      console.warn('日付データがnullまたはundefinedです');
+      return null;
+    }
+    
+    // すでにDateオブジェクトの場合
+    if (dateData instanceof Date) {
+      return dateData;
+    }
+    
+    // Firestoreのタイムスタンプの場合
+    if (typeof dateData.toDate === 'function') {
+      return dateData.toDate();
+    }
+    
+    // seconds, nanosecondsプロパティを持つオブジェクトの場合（Firestoreタイムスタンプの生データ）
+    if (dateData.seconds !== undefined && dateData.nanoseconds !== undefined) {
+      return new Date(dateData.seconds * 1000 + dateData.nanoseconds / 1000000);
+    }
+    
+    // secondsプロパティのみを持つオブジェクトの場合
+    if (dateData.seconds !== undefined) {
+      return new Date(dateData.seconds * 1000);
+    }
+    
+    // 数値型（ミリ秒）の場合
+    if (typeof dateData === 'number') {
+      return new Date(dateData);
+    }
+    
+    // 文字列の場合
+    if (typeof dateData === 'string') {
+      const parsedDate = new Date(dateData);
+      if (!isNaN(parsedDate.getTime())) {
+        return parsedDate;
+      }
+    }
+    
+    // その他の形式の場合はログを残す
+    console.warn('不明な日付形式:', dateData);
+    return null;
+  } catch (error) {
+    console.error('日付の変換に失敗:', error);
+    return null;
+  }
+};
+
+// 日付フォーマットのユーティリティ関数
+const formatDateWithTime = (dateValue) => {
+  if (!dateValue) return '';
+
+  try {
+    const date = safeConvertDate(dateValue);
+    if (!date) return '';
+
+    return date.toLocaleString('ja-JP', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } catch (error) {
+    console.error('Date formatting error:', error);
+    return '';
+  }
+};
+
+// 予約日付のみのフォーマット（時刻なし）
+const formatDateOnly = (dateValue) => {
+  if (!dateValue) return '';
+
+  try {
+    const date = safeConvertDate(dateValue);
+    if (!date) return '';
+
+    return date.toLocaleDateString('ja-JP', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    });
+  } catch (error) {
+    console.error('Date formatting error:', error);
+    return '';
+  }
+};
 
 const ReservationHistory = () => {
-  const navigate = useNavigate();
-  const { currentUser } = useAuth();
   const [reservations, setReservations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [cancelStatus, setCancelStatus] = useState({ id: null, loading: false });
+  const { currentUser } = useAuth();
+  const navigate = useNavigate();
 
   useEffect(() => {
-    const fetchReservations = async () => {
+    const fetchReservationHistory = async () => {
+      if (!currentUser) return;
+      
       try {
-        const userId = currentUser?.uid || JSON.parse(sessionStorage.getItem('guestUser'))?.id;
-        
-        if (!userId) {
-          setError('ログインが必要です。');
-          setTimeout(() => {
-            navigate('/login');
-          }, 2000);
-          return;
-        }
-
+        const reservationsRef = collection(db, 'reservations');
         const q = query(
-          collection(db, 'reservations'),
-          where('userId', '==', userId),
-          orderBy('date', 'asc')
+          reservationsRef,
+          where('userId', '==', currentUser.uid),
+          orderBy('createdAt', 'desc')
         );
 
         const querySnapshot = await getDocs(q);
         const reservationData = querySnapshot.docs.map(doc => {
           const data = doc.data();
-          // 日付データの処理を改善
-          let dateObj;
-          try {
-            if (data.date instanceof Timestamp) {
-              dateObj = data.date.toDate();
-            } else if (typeof data.date === 'string') {
-              dateObj = new Date(data.date);
-            } else if (data.date && typeof data.date.seconds === 'number') {
-              dateObj = new Date(data.date.seconds * 1000);
-            } else {
-              console.warn('Invalid date format:', data.date);
-              dateObj = new Date(); // フォールバック
-            }
-          } catch (error) {
-            console.error('Date parsing error:', error);
-            dateObj = new Date(); // フォールバック
-          }
-
+          // 日付を安全に変換
+          const reservationDate = data.date ? safeConvertDate(data.date) : null;
+          
           return {
             id: doc.id,
             ...data,
-            date: dateObj
+            dateConverted: reservationDate, // 変換済みの日付を保存
+            uniqueKey: `${doc.id}-${data.status || 'default'}-${Date.now()}` // ユニークなキーを生成
           };
-        });
+        }).filter(reservation => reservation.dateConverted !== null); // 無効な日付の予約を除外
 
-        // 現在時刻より前の予約を「過去の予約」としてマーク
-        const now = new Date();
-        const processedReservations = reservationData.map(reservation => ({
-          ...reservation,
-          isPast: reservation.date < now
-        }));
-
-        // 未来の予約を先に、過去の予約を後に表示。それぞれの中で日時順にソート
-        const sortedReservations = processedReservations.sort((a, b) => {
-          if (a.isPast !== b.isPast) {
-            return a.isPast ? 1 : -1;
+        // 重複を除去（同じIDの予約は最新のものだけを残す）
+        const uniqueReservations = reservationData.reduce((acc, current) => {
+          const existingReservation = acc.find(item => item.id === current.id);
+          if (!existingReservation) {
+            acc.push(current);
+          } else if (current.modifiedAt && (!existingReservation.modifiedAt || 
+            safeConvertDate(current.modifiedAt) > safeConvertDate(existingReservation.modifiedAt))) {
+            // 変更された予約は新しい方を残す
+            const index = acc.findIndex(item => item.id === current.id);
+            acc[index] = current;
           }
-          return a.date - b.date;
+          return acc;
+        }, []);
+
+        // 日付でソート
+        uniqueReservations.sort((a, b) => {
+          const dateA = a.dateConverted || new Date(0);
+          const dateB = b.dateConverted || new Date(0);
+          return dateB - dateA; // 降順（新しい順）
         });
 
-        setReservations(sortedReservations);
-        setError(null);
+        console.log('取得した予約履歴:', uniqueReservations.length, '件');
+        setReservations(uniqueReservations);
       } catch (error) {
-        console.error('予約履歴の取得に失敗しました:', error);
-        setError('予約履歴の取得に失敗しました。もう一度お試しください。');
+        console.error('Error fetching reservation history:', error);
+        setError('予約履歴の取得に失敗しました。');
       } finally {
         setLoading(false);
       }
     };
 
-    fetchReservations();
-  }, [navigate, currentUser]);
-
-  const handleCancelReservation = async (reservationId) => {
-    if (!window.confirm('予約をキャンセルしてもよろしいですか？')) {
-      return;
-    }
-
-    setCancelStatus({ id: reservationId, loading: true });
-    try {
-      await deleteDoc(doc(db, 'reservations', reservationId));
-      
-      // 予約リストを更新
-      setReservations(prevReservations => 
-        prevReservations.map(reservation => 
-          reservation.id === reservationId 
-            ? { ...reservation, status: 'cancelled' }
-            : reservation
-        )
-      );
-    } catch (error) {
-      console.error('予約のキャンセルに失敗しました:', error);
-      alert('予約のキャンセルに失敗しました。もう一度お試しください。');
-    } finally {
-      setCancelStatus({ id: null, loading: false });
-    }
-  };
-
-  const formatDate = (date) => {
-    try {
-      if (!date) {
-        console.warn('Invalid date provided to formatDate:', date);
-        return { dateString: '日付不明', timeString: '時間不明' };
-      }
-
-      // 日付と時間を別々にフォーマット
-      const dateString = date.toLocaleDateString('ja-JP', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      });
-
-      const timeString = date.toLocaleTimeString('ja-JP', {
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-
-      return { dateString, timeString };
-    } catch (error) {
-      console.error('Date formatting error:', error);
-      return { dateString: '日付不明', timeString: '時間不明' };
-    }
-  };
-
-  // 支払い方法の表示テキストを取得
-  const getPaymentMethodText = (method) => {
-    switch (method) {
-      case 'credit':
-        return 'クレジットカード';
-      case 'cash':
-        return '現金';
-      default:
-        return '未定';
-    }
-  };
+    fetchReservationHistory();
+  }, [currentUser]);
 
   if (loading) {
-    return <div className="flex justify-center items-center min-h-screen">
-      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
-    </div>;
+    return (
+      <PageLayout centerContent>
+        <LoadingSpinner />
+      </PageLayout>
+    );
   }
 
   if (error) {
     return (
-      <div className="min-h-screen bg-gray-100 py-12 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-4xl mx-auto">
-          <div className="bg-red-50 border border-red-200 rounded-md p-4">
-            <p className="text-red-700">{error}</p>
+      <PageLayout>
+        <div className="max-w-4xl mx-auto p-4">
+          <div className="bg-red-50 border border-red-400 text-red-700 px-4 py-3 rounded">
+            <p>{error}</p>
           </div>
         </div>
-      </div>
+      </PageLayout>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-4xl mx-auto">
-        <div className="bg-white shadow-lg rounded-lg overflow-hidden">
-          <div className="bg-blue-500 text-white px-6 py-4">
-            <h2 className="text-2xl font-bold">予約履歴</h2>
-          </div>
+    <PageLayout>
+      <div className="max-w-7xl mx-auto">
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-extrabold text-gray-900">予約履歴</h1>
+          <p className="mt-2 text-sm text-gray-600">過去の予約内容を確認できます</p>
+        </div>
 
-          <div className="p-6">
-            {reservations.length === 0 ? (
-              <p className="text-center text-gray-600">予約履歴がありません</p>
-            ) : (
-              <div className="space-y-6">
-                {reservations.map((reservation) => {
-                  const { dateString, timeString } = formatDate(reservation.date);
-                  const isPastReservation = reservation.isPast;
-                  
-                  return (
-                    <div
-                      key={reservation.id}
-                      className={`border rounded-lg p-4 hover:shadow-md transition-shadow ${
-                        isPastReservation ? 'bg-gray-50' : ''
-                      }`}
-                    >
-                      <div className="flex justify-between items-start">
-                        <div className="space-y-2">
-                          <div>
-                            <p className="font-medium text-lg text-gray-900">
-                              {dateString}
-                            </p>
-                            <p className="text-sm text-gray-600">
-                              {timeString}
-                            </p>
-                          </div>
-                          {reservation.customerInfo && (
-                            <div className="text-sm text-gray-600 border-l-2 border-blue-500 pl-2">
-                              <p>
-                                予約者: {reservation.customerInfo.name}
-                                {reservation.customerInfo.nameKana && (
-                                  <span className="text-gray-500 ml-2">
-                                    ({reservation.customerInfo.nameKana})
-                                  </span>
-                                )}
-                              </p>
-                              <p>電話番号: {reservation.customerInfo.phone}</p>
-                              <p>メール: {reservation.customerInfo.email}</p>
-                            </div>
-                          )}
-                          <p className="text-sm text-gray-600">
-                            {reservation.numberOfPeople}名 / {reservation.seatType}
+        {reservations.length === 0 ? (
+          <div className="text-center py-12">
+            <p className="text-gray-500">予約履歴はありません</p>
+            <button
+              onClick={() => navigate('/new-reservation')}
+              className="mt-4 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700"
+            >
+              新規予約を作成
+            </button>
+          </div>
+        ) : (
+          <div className="bg-white shadow overflow-hidden sm:rounded-md">
+            <ul className="divide-y divide-gray-200">
+              {reservations.map((reservation) => (
+                <li key={reservation.uniqueKey} className="hover:bg-gray-50">
+                  <div className="px-4 py-4 sm:px-6">
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col flex-grow">
+                        <div className="flex items-center justify-between">
+                          <p className="text-sm font-medium text-blue-600">
+                            {formatDateOnly(reservation.dateConverted)} {reservation.time}
                           </p>
-                          {reservation.courseType && (
-                            <p className="text-sm text-gray-600">
-                              コース: {reservation.courseType}
-                            </p>
-                          )}
-                          <div className="text-sm text-gray-600">
-                            <p>支払い方法: {getPaymentMethodText(reservation.paymentMethod)}</p>
-                            {reservation.cardInfo && (
-                              <p className="mt-1">
-                                カード番号: ****-****-****-{reservation.cardInfo.lastFourDigits}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                            reservation.status === 'confirmed' ? 'bg-green-100 text-green-800' :
-                            reservation.status === 'cancelled' ? 'bg-red-100 text-red-800' :
-                            'bg-gray-100 text-gray-800'
-                          }`}>
-                            {reservation.status === 'confirmed' ? '予約確定' :
-                             reservation.status === 'cancelled' ? 'キャンセル済み' :
-                             '処理中'}
+                          <span className={`ml-2 px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${STATUS_DISPLAY[reservation.status]?.class || STATUS_DISPLAY[RESERVATION_STATUS.CONFIRMED].class}`}>
+                            {STATUS_DISPLAY[reservation.status]?.text || STATUS_DISPLAY[RESERVATION_STATUS.CONFIRMED].text}
                           </span>
-                          <p className="mt-1 text-sm text-gray-600">
-                            予約番号: {reservation.id}
+                        </div>
+                        <div className="mt-2">
+                          <p className="text-sm text-gray-900">
+                            {reservation.numberOfPeople}名様 / {reservation.course === 'standard' ? 'スタンダード' : 'プレミアム'}コース
                           </p>
-                          <p className="mt-1 text-sm text-gray-600">
-                            お支払い: ¥{reservation.totalAmount?.toLocaleString() || '0'}
+                          <p className="text-sm text-gray-600">
+                            {reservation.seatType === 'counter' ? 'カウンター席' : 
+                             reservation.seatType === 'table' ? 'テーブル席' : '個室'}
                           </p>
-                          {!isPastReservation && reservation.status === 'confirmed' && (
-                            <button
-                              onClick={() => handleCancelReservation(reservation.id)}
-                              disabled={cancelStatus.loading && cancelStatus.id === reservation.id}
-                              className={`mt-2 px-3 py-1 text-sm text-white bg-red-500 rounded hover:bg-red-600 transition-colors ${
-                                (cancelStatus.loading && cancelStatus.id === reservation.id) ? 'opacity-50 cursor-not-allowed' : ''
-                              }`}
-                            >
-                              {cancelStatus.loading && cancelStatus.id === reservation.id
-                                ? 'キャンセル中...'
-                                : 'キャンセルする'}
-                            </button>
+                          {reservation.createdAt && (
+                            <p className="text-sm text-gray-500 mt-1">
+                              予約日時: {formatDateWithTime(reservation.createdAt)}
+                            </p>
+                          )}
+                          {reservation.cancelledAt && (
+                            <p className="text-sm text-red-600 mt-1">
+                              キャンセル日時: {formatDateWithTime(reservation.cancelledAt)}
+                            </p>
+                          )}
+                          {reservation.modifiedAt && (
+                            <p className="text-sm text-yellow-600 mt-1">
+                              変更日時: {formatDateWithTime(reservation.modifiedAt)}
+                            </p>
                           )}
                         </div>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            )}
-
-            <div className="mt-6 flex justify-center">
-              <button
-                onClick={() => navigate('/new-reservation')}
-                className="bg-blue-500 text-white px-6 py-2 rounded-md hover:bg-blue-600 transition-colors"
-              >
-                新規予約
-              </button>
-            </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
           </div>
+        )}
+
+        <div className="mt-6 text-center">
+          <button
+            onClick={() => navigate('/')}
+            className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50"
+          >
+            現在の予約状況に戻る
+          </button>
         </div>
       </div>
-    </div>
+    </PageLayout>
   );
 };
 

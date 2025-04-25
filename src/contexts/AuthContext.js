@@ -10,7 +10,8 @@ import {
 import { 
   doc, 
   setDoc,
-  getDoc
+  getDoc,
+  enableIndexedDbPersistence
 } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 
@@ -23,98 +24,107 @@ export function useAuth() {
 export function AuthProvider({ children }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const navigate = useNavigate();
 
-  // Firebase login
-  const login = async (email, password) => {
+  // Monitor online/offline status
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  async function login(email, password) {
     try {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      const userDoc = await getDoc(doc(db, 'users', userCredential.user.uid));
-      if (userDoc.exists()) {
-        setCurrentUser({ ...userCredential.user, ...userDoc.data() });
-      }
-      return userCredential.user;
+      await loadUserData(userCredential.user);
+      return userCredential;
     } catch (error) {
       console.error('Login error:', error);
-      throw new Error('ログインに失敗しました');
+      throw error;
     }
-  };
+  }
 
-  // Guest login
-  const loginAsGuest = async () => {
+  async function loginAsGuest() {
     try {
-      const guestCredential = await signInAnonymously(auth);
-      // ゲストユーザー情報をFirestoreに保存
-      await setDoc(doc(db, 'users', guestCredential.user.uid), {
-        name: 'ゲスト',
-        nameKana: 'ゲスト',
-        isGuest: true,
-        createdAt: new Date()
-      });
-      setCurrentUser({
-        ...guestCredential.user,
-        name: 'ゲスト',
-        isGuest: true
-      });
-      return guestCredential.user;
+      const userCredential = await signInAnonymously(auth);
+      await loadUserData(userCredential.user);
+      return userCredential;
     } catch (error) {
       console.error('Guest login error:', error);
-      throw new Error('ゲストログインに失敗しました');
+      throw error;
     }
-  };
+  }
 
-  // Firebase logout
-  const logout = async () => {
+  async function register(email, password, userData) {
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      await createUserDocument(userCredential.user, userData);
+      return userCredential;
+    } catch (error) {
+      console.error('Registration error:', error);
+      throw error;
+    }
+  }
+
+  async function logout() {
     try {
       await signOut(auth);
       setCurrentUser(null);
       navigate('/login');
     } catch (error) {
       console.error('Logout error:', error);
-      throw new Error('ログアウトに失敗しました');
+      throw error;
     }
-  };
+  }
 
-  // Firebase registration
-  const register = async (email, password, userData) => {
+  async function loadUserData(user) {
+    if (!user) return;
+
     try {
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      
-      // Store additional user data in Firestore
-      const userDataToStore = {
-        email: email,
-        name: userData.name,
-        nameKana: userData.nameKana || userData.name, // nameKanaがない場合はnameを使用
-        phone: userData.phone,
-        createdAt: new Date(),
-        isGuest: false,
-        ...userData
-      };
-
-      await setDoc(doc(db, 'users', userCredential.user.uid), userDataToStore);
-
-      setCurrentUser({
-        ...userCredential.user,
-        ...userDataToStore
-      });
-
-      return userCredential.user;
+      const userDoc = await getDoc(doc(db, 'users', user.uid));
+      if (userDoc.exists()) {
+        setCurrentUser({
+          ...user,
+          ...userDoc.data()
+        });
+      } else {
+        setCurrentUser(user);
+      }
     } catch (error) {
-      console.error('Registration error:', error);
-      throw new Error('アカウントの作成に失敗しました');
+      console.error('Error loading user data:', error);
+      setError('ユーザーデータの読み込みに失敗しました');
     }
-  };
+  }
+
+  async function createUserDocument(user, additionalData) {
+    if (!user) return;
+
+    const userRef = doc(db, 'users', user.uid);
+    try {
+      await setDoc(userRef, {
+        email: user.email,
+        createdAt: new Date(),
+        ...additionalData
+      }, { merge: true });
+    } catch (error) {
+      console.error('Error creating user document:', error);
+      throw error;
+    }
+  }
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
-        // Get user data from Firestore when auth state changes
-        const userDoc = await getDoc(doc(db, 'users', user.uid));
-        if (userDoc.exists()) {
-          setCurrentUser({ ...user, ...userDoc.data() });
-        } else {
-          setCurrentUser(user);
-        }
+        await loadUserData(user);
       } else {
         setCurrentUser(null);
       }
@@ -127,10 +137,12 @@ export function AuthProvider({ children }) {
   const value = {
     currentUser,
     loading,
+    isOffline,
     login,
     logout,
     register,
-    loginAsGuest
+    loginAsGuest,
+    error
   };
 
   return (

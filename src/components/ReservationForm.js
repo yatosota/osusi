@@ -1,15 +1,122 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef, memo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { format, addDays, startOfWeek, isSameDay } from 'date-fns';
 import { ja } from 'date-fns/locale';
 import { useAuth } from '../contexts/AuthContext';
+import DatePicker from 'react-datepicker';
+import "react-datepicker/dist/react-datepicker.css";
+import { FaCalendarAlt, FaClock } from 'react-icons/fa';
+import { db } from '../firebase';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+
+// 日付選択コンポーネントをメモ化
+const MemoizedDatePicker = memo(({ selectedDate, onChange }) => {
+  return (
+    <div className="relative">
+      <DatePicker
+        selected={selectedDate}
+        onChange={onChange}
+        dateFormat="yyyy/MM/dd"
+        minDate={new Date()}
+        className="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+      />
+      <FaCalendarAlt className="absolute right-3 top-3 text-gray-400" />
+    </div>
+  );
+});
+
+// 時間選択コンポーネントをメモ化
+const MemoizedTimeSelector = memo(({ selectedTime, showTimeSelect, toggleTimeSelect, handleTimeSelect, timeSlots }) => {
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={toggleTimeSelect}
+        className="w-full text-left rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+      >
+        {selectedTime || '時間を選択'}
+        <FaClock className="absolute right-3 top-3 text-gray-400" />
+      </button>
+      {showTimeSelect && (
+        <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg">
+          {timeSlots.map(time => (
+            <button
+              key={time}
+              type="button"
+              onClick={() => handleTimeSelect(time)}
+              className="block w-full px-4 py-2 text-left hover:bg-gray-100"
+            >
+              {time}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
+// 席タイプ選択コンポーネントをメモ化
+const MemoizedSeatTypeSelector = memo(({ selectedSeatType, onChange }) => {
+  return (
+    <select
+      value={selectedSeatType}
+      onChange={onChange}
+      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+    >
+      <option value="counter">カウンター席 (追加料金なし)</option>
+      <option value="table">テーブル席 (+¥500/人)</option>
+      <option value="private">個室 (+¥2,000/人)</option>
+    </select>
+  );
+});
+
+// 人数選択コンポーネントをメモ化
+const MemoizedPeopleSelector = memo(({ numberOfPeople, onChange }) => {
+  return (
+    <select
+      value={numberOfPeople}
+      onChange={onChange}
+      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+    >
+      {[...Array(8)].map((_, i) => (
+        <option key={i + 1} value={i + 1}>{i + 1}名</option>
+      ))}
+    </select>
+  );
+});
+
+// コース選択コンポーネントをメモ化
+const MemoizedCourseSelector = memo(({ courses, selectedCourse, onCourseSelect }) => {
+  return (
+    <div className="grid grid-cols-2 gap-6">
+      {Object.entries(courses).map(([id, course]) => (
+        <div
+          key={id}
+          className={`border rounded-lg p-4 cursor-pointer ${
+            selectedCourse === id ? 'border-indigo-600 bg-indigo-50' : 'border-gray-200'
+          }`}
+          onClick={() => onCourseSelect(id)}
+        >
+          <h4 className="font-medium text-lg">{course.name}</h4>
+          <p className="text-gray-600 text-sm mt-1">{course.description}</p>
+          <p className="text-indigo-600 font-medium mt-2">¥{course.price.toLocaleString()}/人</p>
+        </div>
+      ))}
+    </div>
+  );
+});
 
 const ReservationForm = () => {
-  const [currentWeek, setCurrentWeek] = useState(new Date());
+  // useRefを使用して初回レンダリングをトラッキング
+  const initialRenderRef = useRef(true);
+  const editDataProcessedRef = useRef(false);
+
   const [selectedDate, setSelectedDate] = useState(null);
   const [selectedTime, setSelectedTime] = useState(null);
   const [selectedSeatType, setSelectedSeatType] = useState('counter');
+  const [selectedCourse, setSelectedCourse] = useState('standard');
   const [numberOfPeople, setNumberOfPeople] = useState(1);
+  const [showTimeSelect, setShowTimeSelect] = useState(false);
   const [customerInfo, setCustomerInfo] = useState({
     name: '',
     nameKana: '',
@@ -17,8 +124,93 @@ const ReservationForm = () => {
     email: ''
   });
   const [loading, setLoading] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
   const navigate = useNavigate();
-  const { currentUser } = useAuth();
+  const { currentUser, loading: authLoading } = useAuth();
+
+  // 編集データの読み込み - 初回のみ実行
+  useEffect(() => {
+    // 既に処理済みの場合は何もしない
+    if (editDataProcessedRef.current) return;
+    
+    // 編集データの処理フラグを設定
+    editDataProcessedRef.current = true;
+    
+    const loadEditData = () => {
+      const editData = sessionStorage.getItem('editReservationData');
+      if (editData) {
+        try {
+          const parsedData = JSON.parse(editData);
+          
+          // 一度にすべての状態を更新
+          const updates = {};
+          
+          if (parsedData.date && parsedData.date.seconds) {
+            updates.selectedDate = new Date(parsedData.date.seconds * 1000);
+          }
+          
+          if (parsedData.time) updates.selectedTime = parsedData.time;
+          if (parsedData.seatType) updates.selectedSeatType = parsedData.seatType;
+          if (parsedData.course) updates.selectedCourse = parsedData.course;
+          if (parsedData.numberOfPeople) updates.numberOfPeople = parsedData.numberOfPeople;
+          
+          if (parsedData.customerInfo) {
+            updates.customerInfo = parsedData.customerInfo;
+          }
+          
+          // すべての状態を一度に更新
+          if (updates.selectedDate) setSelectedDate(updates.selectedDate);
+          if (updates.selectedTime) setSelectedTime(updates.selectedTime);
+          if (updates.selectedSeatType) setSelectedSeatType(updates.selectedSeatType);
+          if (updates.selectedCourse) setSelectedCourse(updates.selectedCourse);
+          if (updates.numberOfPeople) setNumberOfPeople(updates.numberOfPeople);
+          if (updates.customerInfo) setCustomerInfo(updates.customerInfo);
+          
+          setIsEditing(true);
+          
+          // 編集データを使用したら削除
+          sessionStorage.removeItem('editReservationData');
+          console.log('編集データを読み込みました');
+        } catch (error) {
+          console.error('編集データの解析に失敗しました:', error);
+        }
+      } else if (currentUser && !currentUser.isGuest) {
+        // ユーザー情報の設定は一度だけ
+        setCustomerInfo({
+          name: currentUser.name || '',
+          nameKana: currentUser.nameKana || '',
+          phone: currentUser.phone || '',
+          email: currentUser.email || ''
+        });
+        console.log('ユーザー情報を設定しました');
+      }
+    };
+    
+    if (!authLoading) {
+      loadEditData();
+    }
+  }, [currentUser, authLoading]); // 依存配列を最小限に
+
+  // コースの定義
+  const courses = {
+    standard: {
+      name: 'スタンダードコース',
+      description: '季節の食材を使用した基本的なコース',
+      price: 8000
+    },
+    premium: {
+      name: 'プレミアムコース',
+      description: '厳選された高級食材を使用した特別コース',
+      price: 12000
+    }
+  };
+
+  // 席タイプごとの追加料金
+  const seatPrices = {
+    counter: 0,
+    table: 500,
+    private: 2000
+  };
 
   // 営業時間の設定
   const timeSlots = [
@@ -26,29 +218,30 @@ const ReservationForm = () => {
     '20:00', '20:30', '21:00', '21:30'
   ];
 
-  // 週の日付を生成
-  const weekDays = [...Array(7)].map((_, index) => {
-    return addDays(startOfWeek(currentWeek, { weekStartsOn: 1 }), index);
-  });
-
-  // 前の週へ
-  const previousWeek = () => {
-    setCurrentWeek(prev => addDays(prev, -7));
+  // 合計金額の計算
+  const calculateTotalPrice = () => {
+    const basePrice = courses[selectedCourse].price;
+    const seatPrice = seatPrices[selectedSeatType];
+    return (basePrice + seatPrice) * numberOfPeople;
   };
 
-  // 次の週へ
-  const nextWeek = () => {
-    setCurrentWeek(prev => addDays(prev, 7));
-  };
+  // コールバックをメモ化
+  const toggleTimeSelect = useCallback(() => {
+    setShowTimeSelect(prev => !prev);
+  }, []);
 
-  // テスト用：すべての時間枠を予約可能に
-  const isAvailable = () => true;
-
-  // 日付と時間の選択
-  const handleTimeSlotClick = (date, time) => {
-    setSelectedDate(date);
+  const handleTimeSelect = useCallback((time) => {
     setSelectedTime(time);
-  };
+    setShowTimeSelect(false);
+  }, []);
+
+  const handleSeatTypeChange = useCallback((e) => {
+    setSelectedSeatType(e.target.value);
+  }, []);
+
+  const handlePeopleChange = useCallback((e) => {
+    setNumberOfPeople(Number(e.target.value));
+  }, []);
 
   // 顧客情報の更新
   const handleCustomerInfoChange = (e) => {
@@ -69,6 +262,16 @@ const ReservationForm = () => {
            customerInfo.email;
   };
 
+  // 日付選択のコールバックをメモ化
+  const handleDateChange = useCallback((date) => {
+    setSelectedDate(date);
+  }, []);
+
+  // コース選択のコールバックをメモ化
+  const handleCourseSelect = useCallback((courseId) => {
+    setSelectedCourse(courseId);
+  }, []);
+
   // 予約フォームの送信
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -85,13 +288,25 @@ const ReservationForm = () => {
       const reservationData = {
         date: selectedDate,
         time: selectedTime,
+        course: selectedCourse,
         numberOfPeople,
         seatType: selectedSeatType,
+        totalPrice: calculateTotalPrice(),
         customerInfo,
         userId,
-        isGuest: !!guestUser
+        isGuest: !!guestUser,
+        status: 'confirmed',
+        createdAt: serverTimestamp()
       };
-      sessionStorage.setItem('reservationData', JSON.stringify(reservationData));
+
+      // 新規予約をFirestoreに追加
+      const docRef = await addDoc(collection(db, 'reservations'), reservationData);
+      
+      // 予約データをセッションストレージに保存
+      sessionStorage.setItem('reservationData', JSON.stringify({
+        ...reservationData,
+        id: docRef.id
+      }));
 
       navigate('/payment');
     } catch (error) {
@@ -105,151 +320,87 @@ const ReservationForm = () => {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="bg-white shadow-lg rounded-lg p-6">
-        <h2 className="text-2xl font-bold mb-6 text-gray-900">ご予約</h2>
-        
-        {/* プログレスバー */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center">
-              <div className={`rounded-full h-8 w-8 flex items-center justify-center ${
-                selectedDate && selectedTime ? 'bg-indigo-600 text-white' : 'bg-gray-200'
-              }`}>
-                1
-              </div>
-              <div className="ml-2">日時選択</div>
-            </div>
-            <div className="flex-1 h-1 mx-4 bg-gray-200">
-              <div className={`h-1 ${
-                selectedDate && selectedTime ? 'bg-indigo-600' : ''
-              }`} style={{ width: selectedDate && selectedTime ? '100%' : '0%' }}></div>
-            </div>
-            <div className="flex items-center">
-              <div className={`rounded-full h-8 w-8 flex items-center justify-center ${
-                selectedSeatType && numberOfPeople ? 'bg-indigo-600 text-white' : 'bg-gray-200'
-              }`}>
-                2
-              </div>
-              <div className="ml-2">席・人数</div>
-            </div>
-            <div className="flex-1 h-1 mx-4 bg-gray-200">
-              <div className={`h-1 ${
-                isFormComplete() ? 'bg-indigo-600' : ''
-              }`} style={{ width: isFormComplete() ? '100%' : '0%' }}></div>
-            </div>
-            <div className="flex items-center">
-              <div className={`rounded-full h-8 w-8 flex items-center justify-center ${
-                isFormComplete() ? 'bg-indigo-600 text-white' : 'bg-gray-200'
-              }`}>
-                3
-              </div>
-              <div className="ml-2">個人情報</div>
-            </div>
-          </div>
-        </div>
+        <h2 className="text-2xl font-bold mb-6 text-gray-900">
+          {isEditing ? '予約内容の変更' : 'ご予約'}
+        </h2>
 
         <form onSubmit={handleSubmit} className="space-y-8">
+          {/* コース選択セクション */}
+          <section className="mb-8">
+            <h3 className="text-lg font-medium text-gray-900 mb-4">1. コースの選択</h3>
+            <MemoizedCourseSelector 
+              courses={courses}
+              selectedCourse={selectedCourse}
+              onCourseSelect={handleCourseSelect}
+            />
+          </section>
+
           {/* 日時選択セクション */}
           <section className="mb-8">
-            <h3 className="text-lg font-medium text-gray-900 mb-4">1. 日時の選択</h3>
-            <div className="flex justify-between items-center mb-4">
-              <button
-                type="button"
-                onClick={previousWeek}
-                className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
-              >
-                前の週
-              </button>
-              <span className="text-lg font-semibold">
-                {format(weekDays[0], 'M月d日', { locale: ja })} - 
-                {format(weekDays[6], 'M月d日', { locale: ja })}
-              </span>
-              <button
-                type="button"
-                onClick={nextWeek}
-                className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
-              >
-                次の週
-              </button>
-            </div>
-
-            <div className="grid grid-cols-8 gap-2">
-              {/* 時間枠の列 */}
-              <div className="col-span-1">
-                <div className="h-10"></div>
-                {timeSlots.map(time => (
-                  <div key={time} className="h-10 flex items-center justify-end pr-2 text-sm text-gray-600">
-                    {time}
-                  </div>
-                ))}
+            <h3 className="text-lg font-medium text-gray-900 mb-4">2. 日時の選択</h3>
+            <div className="grid grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  予約日
+                </label>
+                <MemoizedDatePicker
+                  selectedDate={selectedDate}
+                  onChange={handleDateChange}
+                />
               </div>
-
-              {/* 日付と予約枠 */}
-              {weekDays.map(day => (
-                <div key={day.toString()} className="col-span-1">
-                  <div className="h-10 text-center font-semibold p-2 bg-gray-100">
-                    {format(day, 'd\nE', { locale: ja })}
-                  </div>
-                  {timeSlots.map(time => {
-                    const isSelected = selectedDate && selectedTime &&
-                      isSameDay(day, selectedDate) && time === selectedTime;
-
-                    return (
-                      <button
-                        type="button"
-                        key={`${day}-${time}`}
-                        onClick={() => handleTimeSlotClick(day, time)}
-                        className={`
-                          h-10 w-full border rounded
-                          ${isSelected ? 'bg-indigo-600 text-white' : 'bg-white hover:bg-gray-100'}
-                        `}
-                      >
-                        ○
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  予約時間
+                </label>
+                <MemoizedTimeSelector
+                  selectedTime={selectedTime}
+                  showTimeSelect={showTimeSelect}
+                  toggleTimeSelect={toggleTimeSelect}
+                  handleTimeSelect={handleTimeSelect}
+                  timeSlots={timeSlots}
+                />
+              </div>
             </div>
           </section>
 
           {/* 席タイプと人数選択セクション */}
           <section className="mb-8">
-            <h3 className="text-lg font-medium text-gray-900 mb-4">2. 席タイプと人数の選択</h3>
+            <h3 className="text-lg font-medium text-gray-900 mb-4">3. 席タイプと人数の選択</h3>
             <div className="grid grid-cols-2 gap-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   席タイプ
                 </label>
-                <select
-                  value={selectedSeatType}
-                  onChange={(e) => setSelectedSeatType(e.target.value)}
-                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-                >
-                  <option value="counter">カウンター席</option>
-                  <option value="table">テーブル席</option>
-                  <option value="private">個室</option>
-                </select>
+                <MemoizedSeatTypeSelector
+                  selectedSeatType={selectedSeatType}
+                  onChange={handleSeatTypeChange}
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   人数
                 </label>
-                <select
-                  value={numberOfPeople}
-                  onChange={(e) => setNumberOfPeople(Number(e.target.value))}
-                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-                >
-                  {[...Array(8)].map((_, i) => (
-                    <option key={i + 1} value={i + 1}>{i + 1}名</option>
-                  ))}
-                </select>
+                <MemoizedPeopleSelector
+                  numberOfPeople={numberOfPeople}
+                  onChange={handlePeopleChange}
+                />
               </div>
+            </div>
+            <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+              <p className="text-lg font-medium">予約内容</p>
+              <p className="mt-2">
+                {courses[selectedCourse].name}: ¥{courses[selectedCourse].price.toLocaleString()}/人
+                {seatPrices[selectedSeatType] > 0 && ` + 席料: ¥${seatPrices[selectedSeatType].toLocaleString()}/人`}
+              </p>
+              <p className="mt-1">
+                合計金額: ¥{calculateTotalPrice().toLocaleString()} ({numberOfPeople}名様)
+              </p>
             </div>
           </section>
 
           {/* 個人情報入力セクション */}
           <section className="mb-8">
-            <h3 className="text-lg font-medium text-gray-900 mb-4">3. お客様情報の入力</h3>
+            <h3 className="text-lg font-medium text-gray-900 mb-4">4. お客様情報</h3>
             <div className="grid grid-cols-2 gap-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -266,7 +417,7 @@ const ReservationForm = () => {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  お名前（フリガナ）
+                  フリガナ
                 </label>
                 <input
                   type="text"
@@ -306,19 +457,17 @@ const ReservationForm = () => {
             </div>
           </section>
 
-          {/* 予約ボタン */}
-          <div className="flex justify-end">
+          <div className="mt-8">
             <button
               type="submit"
-              disabled={!isFormComplete() || loading}
-              className={`
-                px-6 py-3 rounded-md text-white font-medium
-                ${isFormComplete() && !loading
-                  ? 'bg-indigo-600 hover:bg-indigo-700'
-                  : 'bg-gray-400 cursor-not-allowed'}
-              `}
+              disabled={loading || !isFormComplete()}
+              className={`w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ${
+                loading || !isFormComplete()
+                  ? 'bg-gray-400 cursor-not-allowed'
+                  : 'bg-indigo-600 hover:bg-indigo-700'
+              }`}
             >
-              {loading ? '処理中...' : '予約内容の確認へ進む'}
+              {loading ? '処理中...' : isEditing ? '予約を変更する' : '予約する'}
             </button>
           </div>
         </form>
