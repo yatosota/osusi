@@ -1,5 +1,12 @@
 import { initializeApp } from 'firebase/app';
-import { getFirestore, enableIndexedDbPersistence, CACHE_SIZE_UNLIMITED } from 'firebase/firestore';
+import { 
+  getFirestore, 
+  enableIndexedDbPersistence, 
+  CACHE_SIZE_UNLIMITED,
+  initializeFirestore as initFirestore,
+  persistentLocalCache,
+  persistentSingleTabManager
+} from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 
 // Firebase Configuration
@@ -19,29 +26,16 @@ const app = initializeApp(firebaseConfig);
 // Initialize Auth
 const auth = getAuth(app);
 
-// Initialize Firestore with settings
-const db = getFirestore(app);
+// より新しいAPIを使用してFirestoreを初期化
+// シングルタブ設定でキャッシュをセットアップ
+const db = initFirestore(app, {
+  localCache: persistentLocalCache({
+    tabManager: persistentSingleTabManager(),
+    cacheSizeBytes: CACHE_SIZE_UNLIMITED
+  })
+});
 
-// Enable offline persistence with error handling
-const initializeFirestore = async () => {
-  try {
-    await enableIndexedDbPersistence(db, {
-      cacheSizeBytes: CACHE_SIZE_UNLIMITED
-    });
-    console.log('Offline persistence enabled successfully');
-  } catch (err) {
-    if (err.code === 'failed-precondition') {
-      console.warn('Multiple tabs open, persistence disabled');
-    } else if (err.code === 'unimplemented') {
-      console.warn('Current browser does not support persistence');
-    } else {
-      console.error('Error enabling persistence:', err);
-    }
-  }
-};
-
-// Initialize Firestore settings
-initializeFirestore();
+console.log('Firestore initialized with persistent single tab cache');
 
 export { db, auth };
 export default app; 

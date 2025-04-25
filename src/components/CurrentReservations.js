@@ -14,6 +14,16 @@ const RESERVATION_STATUS = {
   EXPIRED: 'expired'
 };
 
+// 重複削除用のユーティリティ関数
+const removeDuplicateById = (array) => {
+  const seen = new Set();
+  return array.filter(item => {
+    const duplicate = seen.has(item.id);
+    seen.add(item.id);
+    return !duplicate;
+  });
+};
+
 const CurrentReservations = () => {
   const [reservations, setReservations] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -93,55 +103,42 @@ const CurrentReservations = () => {
       const currentDate = new Date();
       currentDate.setHours(0, 0, 0, 0);
       
-      // 完全に新しいアプローチ：
-      // 1. まず現在のユーザーのすべての予約IDを取得（ステータスに関係なく）
+      // より単純で確実なアプローチ
       const reservationsRef = collection(db, 'reservations');
-      const userReservationsQuery = query(
+      
+      // 明示的に確定済みの予約のみを取得
+      const confirmedQuery = query(
         reservationsRef,
-        where('userId', '==', currentUser.uid)
+        where('userId', '==', currentUser.uid),
+        where('status', '==', RESERVATION_STATUS.CONFIRMED),
+        where('date', '>=', currentDate)
       );
       
-      const allSnapshot = await getDocs(userReservationsQuery);
-      console.log(`ユーザーの全予約データ: ${allSnapshot.size}件`);
+      const querySnapshot = await getDocs(confirmedQuery);
+      console.log(`確定済みの予約データ: ${querySnapshot.size}件`);
       
-      // 予約IDごとの最新データを追跡する一時オブジェクト
-      const latestReservations = {};
-      
-      // すべての予約を確認し、最新のステータスを持つものだけを保持
-      allSnapshot.docs.forEach(docSnapshot => {
-        const id = docSnapshot.id;
-        const data = docSnapshot.data();
-        
-        // 日付の変換
+      // データ変換
+      let confirmedReservations = querySnapshot.docs.map(doc => {
+        const data = doc.data();
         const reservationDate = safeConvertDate(data.date);
-        if (!reservationDate) return; // 無効な日付はスキップ
         
-        // 過去の予約はスキップ
-        if (reservationDate < currentDate) return;
+        // 日付が無効な場合は除外
+        if (!reservationDate) return null;
         
-        // 予約がまだ追跡されていないか、または新しいデータが最新の場合
-        if (!latestReservations[id] || 
-            (data.modifiedAt && 
-             (!latestReservations[id].modifiedAt || 
-              safeConvertDate(data.modifiedAt) > safeConvertDate(latestReservations[id].modifiedAt)))) {
-          
-          latestReservations[id] = {
-            id,
-            ...data,
-            dateConverted: reservationDate,
-            // 完全に一意のキーを生成
-            uniqueKey: `${id}-${Math.random().toString(36).substring(2)}-${Date.now()}`
-          };
-        }
-      });
+        return {
+          id: doc.id,
+          ...data,
+          dateConverted: reservationDate,
+          // IDから生成する一意のキー - Math.randomは使わない
+          uniqueKey: `${doc.id}-${data.status || 'confirmed'}`
+        };
+      }).filter(Boolean); // nullを除外
       
-      // CONFIRMED状態の予約のみをフィルタリング
-      const activeReservations = Object.values(latestReservations).filter(
-        reservation => reservation.status === RESERVATION_STATUS.CONFIRMED
-      );
+      // 重複IDがあれば排除する（念のため）
+      confirmedReservations = removeDuplicateById(confirmedReservations);
       
       // 日付と時間でソート
-      activeReservations.sort((a, b) => {
+      confirmedReservations.sort((a, b) => {
         // 日付比較
         if (a.dateConverted.getTime() !== b.dateConverted.getTime()) {
           return a.dateConverted - b.dateConverted;
@@ -151,10 +148,21 @@ const CurrentReservations = () => {
         return (a.time || '').localeCompare(b.time || '');
       });
       
-      console.log(`現在の有効予約: ${activeReservations.length}件`);
-      console.log('予約ID一覧:', activeReservations.map(r => r.id).join(', '));
+      // 確認のためにすべてのIDをログ出力
+      console.log(`有効な予約: ${confirmedReservations.length}件`);
+      console.log('予約ID一覧:', confirmedReservations.map(r => r.id).join(', '));
       
-      setReservations(activeReservations);
+      // 重複がないことを確認
+      const ids = confirmedReservations.map(r => r.id);
+      const uniqueIds = [...new Set(ids)];
+      if (ids.length !== uniqueIds.length) {
+        console.warn('重複IDが検出されました！', 
+          ids.filter((id, index) => ids.indexOf(id) !== index));
+      } else {
+        console.log('重複IDはありません - 正常に処理されました');
+      }
+      
+      setReservations(confirmedReservations);
       setError(null);
     } catch (error) {
       console.error('予約データの取得中にエラーが発生しました:', error);
